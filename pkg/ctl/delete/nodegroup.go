@@ -7,7 +7,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha4"
 	"github.com/weaveworks/eksctl/pkg/authconfigmap"
@@ -19,6 +18,9 @@ import (
 var (
 	updateAuthConfigMap  bool
 	deleteNodeGroupDrain bool
+
+	nodeGroupOnlyFilters        []string
+	deleteOnlyMissingNodeGroups bool
 )
 
 func deleteNodeGroupCmd(g *cmdutils.Grouping) *cobra.Command {
@@ -30,8 +32,8 @@ func deleteNodeGroupCmd(g *cmdutils.Grouping) *cobra.Command {
 		Use:     "nodegroup",
 		Short:   "Delete a nodegroup",
 		Aliases: []string{"ng"},
-		Run: func(_ *cobra.Command, args []string) {
-			if err := doDeleteNodeGroup(p, cfg, ng, cmdutils.GetNameArg(args)); err != nil {
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := doDeleteNodeGroup(p, cfg, ng, cmdutils.GetNameArg(args), cmd); err != nil {
 				logger.Critical("%s\n", err.Error())
 				os.Exit(1)
 			}
@@ -43,10 +45,13 @@ func deleteNodeGroupCmd(g *cmdutils.Grouping) *cobra.Command {
 	group.InFlagSet("General", func(fs *pflag.FlagSet) {
 		fs.StringVar(&cfg.Metadata.Name, "cluster", "", "EKS cluster name")
 		cmdutils.AddRegionFlag(fs, p)
-		fs.StringVarP(&ng.Name, "name", "n", "", "Name of the nodegroup to delete (required)")
-		cmdutils.AddWaitFlag(&wait, fs, "deletion of all resources")
+		fs.StringVarP(&ng.Name, "name", "n", "", "Name of the nodegroup to delete")
+		cmdutils.AddConfigFileFlag(&clusterConfigFile, fs)
+		cmdutils.AddNodeGroupsOnlyFlag(&nodeGroupOnlyFilters, fs)
+		fs.BoolVar(&deleteOnlyMissingNodeGroups, "only-missing", false, "Only delete nodegroups that are missing from the given config file")
 		cmdutils.AddUpdateAuthConfigMap(&updateAuthConfigMap, fs, "Remove nodegroup IAM role from aws-auth configmap")
 		fs.BoolVar(&deleteNodeGroupDrain, "drain", true, "Drain and cordon all nodes in the nodegroup before deletion")
+		cmdutils.AddWaitFlag(&wait, fs, "deletion of all resources")
 	})
 
 	cmdutils.AddCommonFlagsForAWS(group, p, true)
@@ -56,31 +61,21 @@ func deleteNodeGroupCmd(g *cmdutils.Grouping) *cobra.Command {
 	return cmd
 }
 
-func doDeleteNodeGroup(p *api.ProviderConfig, cfg *api.ClusterConfig, ng *api.NodeGroup, nameArg string) error {
-	ctl := eks.New(p, cfg)
+func doDeleteNodeGroup(p *api.ProviderConfig, cfg *api.ClusterConfig, ng *api.NodeGroup, nameArg string, cmd *cobra.Command) error {
+	ngFilter := cmdutils.NewNodeGroupFilter()
 
-	if err := api.Register(); err != nil {
+	if deleteOnlyMissingNodeGroups {
+		ngFilter.SkipAll = true
+	}
+
+	if err := cmdutils.NewDeleteNodeGroupLoader(p, cfg, ng, clusterConfigFile, nameArg, cmd, ngFilter, nodeGroupOnlyFilters).Load(); err != nil {
 		return err
 	}
+
+	ctl := eks.New(p, cfg)
 
 	if err := ctl.CheckAuth(); err != nil {
 		return err
-	}
-
-	if cfg.Metadata.Name == "" {
-		return cmdutils.ErrMustBeSet("--cluster")
-	}
-
-	if ng.Name != "" && nameArg != "" {
-		return cmdutils.ErrNameFlagAndArg(ng.Name, nameArg)
-	}
-
-	if nameArg != "" {
-		ng.Name = nameArg
-	}
-
-	if ng.Name == "" {
-		return cmdutils.ErrMustBeSet("--name")
 	}
 
 	if err := ctl.GetCredentials(cfg); err != nil {
@@ -107,16 +102,26 @@ func doDeleteNodeGroup(p *api.ProviderConfig, cfg *api.ClusterConfig, ng *api.No
 
 	stackManager := ctl.NewStackManager(cfg)
 
-	if ng.IAM.InstanceRoleARN == "" {
-		if err := ctl.GetNodeGroupIAM(cfg, ng); err != nil {
-			logger.Warning("%s getting instance role ARN for node group %q", err.Error(), ng.Name)
+	_ = ngFilter.CheckEachNodeGroup(cfg.NodeGroups, func(_ int, ng *api.NodeGroup) error {
+		if ng.IAM.InstanceRoleARN == "" {
+			if err := ctl.GetNodeGroupIAM(cfg, ng); err != nil {
+				logger.Warning("%s getting instance role ARN for node group %q", err.Error(), ng.Name)
+			}
 		}
+		return nil
+	})
+
+	ngSubset := ngFilter.MatchAll(cfg)
+
+	if ngSubset.Len() == 0 && !deleteOnlyMissingNodeGroups {
+		ngFilter.LogInfo(cfg)
+		return nil
 	}
 
 	logger.Info("deleting nodegroup %q in cluster %q", ng.Name, cfg.Metadata.Name)
 
 	{
-		tasks, err := stackManager.NewTasksToDeleteNodeGroups(sets.NewString(ng.Name), wait, nil)
+		tasks, err := stackManager.NewTasksToDeleteNodeGroups(ngSubset, wait, nil)
 		if err != nil {
 			return err
 		}
@@ -125,6 +130,13 @@ func doDeleteNodeGroup(p *api.ProviderConfig, cfg *api.ClusterConfig, ng *api.No
 			return handleErrors(errs, "nodegroup(s)")
 		}
 		logger.Success("all nodes in nodegroup %q will be deleted", ng.Name)
+	}
+
+	if deleteOnlyMissingNodeGroups {
+		// 1. get the list
+		// 2. get IAM ARNs and update auth configmap
+		// 3. delete (blocking and non-blocking)
+		// TODO: rename CheckEachNodeGroup to ForEachNodeGroup
 	}
 
 	return nil

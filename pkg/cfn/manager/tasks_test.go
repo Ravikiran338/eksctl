@@ -402,31 +402,31 @@ var _ = Describe("StackCollection Tasks", func() {
 
 			It("should have nice description", func() {
 				{
-					tasks := stackManager.CreateTasksForNodeGroups(nil)
+					tasks := stackManager.NewTasksToCreateNodeGroups(nil)
 					Expect(tasks.Describe()).To(Equal(`2 parallel tasks: { create nodegroup "bar", create nodegroup "foo" }`))
 				}
 				{
-					tasks := stackManager.CreateTasksForNodeGroups(sets.NewString("bar"))
+					tasks := stackManager.NewTasksToCreateNodeGroups(sets.NewString("bar"))
 					Expect(tasks.Describe()).To(Equal(`1 task: { create nodegroup "bar" }`))
 				}
 				{
-					tasks := stackManager.CreateTasksForNodeGroups(sets.NewString("foo"))
+					tasks := stackManager.NewTasksToCreateNodeGroups(sets.NewString("foo"))
 					Expect(tasks.Describe()).To(Equal(`1 task: { create nodegroup "foo" }`))
 				}
 				{
-					tasks := stackManager.CreateTasksForNodeGroups(sets.NewString())
+					tasks := stackManager.NewTasksToCreateNodeGroups(sets.NewString())
 					Expect(tasks.Describe()).To(Equal(`no tasks`))
 				}
 				{
-					tasks := stackManager.CreateTasksForClusterWithNodeGroups(nil)
+					tasks := stackManager.NewTasksToCreateClusterWithNodeGroups(nil)
 					Expect(tasks.Describe()).To(Equal(`2 sequential tasks: { create cluster control plane "test-cluster", 2 parallel sub-tasks: { create nodegroup "bar", create nodegroup "foo" } }`))
 				}
 				{
-					tasks := stackManager.CreateTasksForClusterWithNodeGroups(sets.NewString("bar"))
+					tasks := stackManager.NewTasksToCreateClusterWithNodeGroups(sets.NewString("bar"))
 					Expect(tasks.Describe()).To(Equal(`2 sequential tasks: { create cluster control plane "test-cluster", create nodegroup "bar" }`))
 				}
 				{
-					tasks := stackManager.CreateTasksForClusterWithNodeGroups(sets.NewString())
+					tasks := stackManager.NewTasksToCreateClusterWithNodeGroups(sets.NewString())
 					Expect(tasks.Describe()).To(Equal(`1 task: { create cluster control plane "test-cluster" }`))
 				}
 			})
